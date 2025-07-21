@@ -35,8 +35,7 @@ impl WrapApp {
             FractalClock::default()
         };
 
-        // Force color computation on first paint
-        clock.colors_dirty = true;
+        clock.mark_colors_dirty();
 
         Self { clock }
     }
@@ -45,6 +44,7 @@ impl WrapApp {
 impl eframe::App for WrapApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.set_visuals(egui::Visuals::dark());
+        self.clock.update(ctx);
 
         let frame = if self.clock.transparent_background {
             egui::Frame {

@@ -41,7 +41,14 @@ pub struct FractalClock {
     #[serde(skip)]
     depth_colors: Vec<Color32>,
     #[serde(skip)]
-    pub colors_dirty: bool,
+    color_state: ColorState,
+}
+
+#[derive(serde::Deserialize, serde::Serialize, PartialEq, Default)]
+enum ColorState {
+    #[default]
+    Clean,
+    Dirty,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -71,12 +78,12 @@ impl Default for FractalClock {
         Self {
             paused: false,
             time: 0.0,
-            zoom: 0.5,
+            zoom: 0.075,
             start_line_width: 5.0,
-            depth: 15,
-            length_factor: 0.75,
+            depth: 14,
+            length_factor: 1.0,
             luminance_factor: 1.0,
-            width_factor: 0.75,
+            width_factor: 0.6,
             line_count: 0,
             paint_time: Duration::ZERO,
             hand_color: Color32::WHITE,
@@ -84,24 +91,26 @@ impl Default for FractalClock {
             transparent_background: true,
             fullscreen: false,
             rainbow_mode: true,
-            colors_dirty: true,
+            color_state: ColorState::Dirty,
 
             // Preallocate buffers
-            nodes_buf1: Vec::with_capacity(1 << 16), // 65536
-            nodes_buf2: Vec::with_capacity(1 << 16), // 65536
-            shapes: Vec::with_capacity(1 << 18),     // 262144
+            nodes_buf1: Vec::with_capacity(1 << 16),
+            nodes_buf2: Vec::with_capacity(1 << 16),
+            shapes: Vec::with_capacity(1 << 18),
             depth_colors: Vec::with_capacity(16),
         }
     }
 }
 
 impl FractalClock {
-    pub fn ui(&mut self, ui: &mut Ui) {
+    pub fn update(&mut self, ctx: &egui::Context) {
         if !self.paused {
             self.time = seconds_since_midnight();
-            ui.ctx().request_repaint();
+            ctx.request_repaint();
         }
+    }
 
+    pub fn ui(&mut self, ui: &mut Ui) {
         let painter = Painter::new(
             ui.ctx().clone(),
             ui.layer_id(),
@@ -135,11 +144,9 @@ impl FractalClock {
             }
 
             let color = if self.rainbow_mode {
-                // Cycle through hues based on depth index
                 let hue = (depth_index as f32) / (self.depth as f32) * 360.0;
                 egui::epaint::Hsva::new(hue / 360.0, 1.0, 1.0, 1.0).into()
             } else {
-                // Original color calculation
                 Color32::from_rgb(
                     (self.branch_color.r() as f32 * luminance).round() as u8,
                     (self.branch_color.g() as f32 * luminance).round() as u8,
@@ -150,7 +157,7 @@ impl FractalClock {
             self.depth_colors.push(color);
         }
 
-        self.colors_dirty = false;
+        self.color_state = ColorState::Clean;
     }
 
     fn options_ui(&mut self, ui: &mut Ui) {
@@ -170,27 +177,29 @@ impl FractalClock {
             .add(Slider::new(&mut self.depth, 0..=20).text("depth"))
             .changed()
         {
-            self.colors_dirty = true;
+            self.mark_colors_dirty();
         }
 
         if ui
             .add(Slider::new(&mut self.length_factor, 0.0..=1.0).text("length factor"))
             .changed()
         {
-            self.colors_dirty = true;
+            self.mark_colors_dirty();
         }
+
         if ui
             .add(Slider::new(&mut self.luminance_factor, 0.0..=1.0).text("luminance factor"))
             .changed()
         {
-            self.colors_dirty = true;
+            self.mark_colors_dirty();
         }
+
         ui.add(Slider::new(&mut self.width_factor, 0.0..=1.0).text("width factor"));
 
         egui::Grid::new("color_settings_grid").show(ui, |ui| {
             ui.label("Branch color:");
             if ui.color_edit_button_srgba(&mut self.branch_color).changed() {
-                self.colors_dirty = true;
+                self.mark_colors_dirty();
             }
             ui.end_row();
             ui.label("Hand color:");
@@ -199,7 +208,7 @@ impl FractalClock {
         });
 
         if ui.checkbox(&mut self.rainbow_mode, "Rainbow").changed() {
-            self.colors_dirty = true;
+            self.mark_colors_dirty();
         }
         ui.checkbox(&mut self.fullscreen, "Fullscreen mode");
         ui.checkbox(&mut self.transparent_background, "Transparent background");
@@ -207,9 +216,13 @@ impl FractalClock {
         egui::reset_button(ui, self, "Reset");
 
         ui.hyperlink_to(
-            "This is the standalone version of this code with some new features",
+            "Standalone version of this code",
             "https://github.com/emilk/egui/blob/main/crates/egui_demo_app/src/apps/fractal_clock.rs",
         );
+    }
+
+    pub fn mark_colors_dirty(&mut self) {
+        self.color_state = ColorState::Dirty;
     }
 
     fn format_time(&self) -> Option<String> {
@@ -224,19 +237,9 @@ impl FractalClock {
     }
 
     fn paint(&mut self, painter: &Painter) {
-        // Precompute colors if needed
-        if self.colors_dirty {
+        if matches!(self.color_state, ColorState::Dirty) {
             self.precompute_colors();
         }
-
-        let angle_from_period =
-            |period| TAU * (self.time.rem_euclid(period) / period) as f32 - TAU / 4.0;
-
-        let hands = [
-            Hand::from_length_angle(self.length_factor, angle_from_period(60.0)), // Second
-            Hand::from_length_angle(self.length_factor, angle_from_period(3600.0)), // Minute
-            Hand::from_length_angle(0.5, angle_from_period(43200.0)),             // Hour
-        ];
 
         let rect = painter.clip_rect();
         let to_screen = emath::RectTransform::from_to(
@@ -249,41 +252,59 @@ impl FractalClock {
         self.nodes_buf2.clear();
 
         let mut line_count = 0;
+        let hands = self.create_hands();
+        let hand_rotors = self.calculate_hand_rotors(&hands);
 
-        let paint_line = |shapes: &mut Vec<Shape>,
-                          points: [Pos2; 2],
-                          color: Color32,
-                          width: f32,
-                          line_count: &mut usize| {
-            let line = [to_screen * points[0], to_screen * points[1]];
-            if rect.intersects(Rect::from_two_pos(line[0], line[1])) {
-                shapes.push(Shape::line_segment(line, (width, color)));
-                *line_count += 1;
-            }
-        };
+        self.draw_hands(&hands, &to_screen, rect, &mut line_count);
+        self.draw_fractal_branches(&hand_rotors, &to_screen, rect, &mut line_count);
 
+        self.line_count = line_count;
+        painter.extend(self.shapes.drain(..));
+    }
+
+    fn create_hands(&self) -> [Hand; 3] {
+        let angle_from_period =
+            |period| TAU * (self.time.rem_euclid(period) / period) as f32 - TAU / 4.0;
+
+        [
+            Hand::from_length_angle(self.length_factor, angle_from_period(60.0)), // Second
+            Hand::from_length_angle(self.length_factor, angle_from_period(3600.0)), // Minute
+            Hand::from_length_angle(0.5, angle_from_period(43200.0)),             // Hour
+        ]
+    }
+
+    fn calculate_hand_rotors(&self, hands: &[Hand; 3]) -> [emath::Rot2; 2] {
         let hand_rotations = [
             hands[0].angle - hands[2].angle + TAU / 2.0,
             hands[1].angle - hands[2].angle + TAU / 2.0,
         ];
 
-        let hand_rotors = [
+        [
             hands[0].length * emath::Rot2::from_angle(hand_rotations[0]),
             hands[1].length * emath::Rot2::from_angle(hand_rotations[1]),
-        ];
+        ]
+    }
 
-        let mut width = self.start_line_width;
+    fn draw_hands(
+        &mut self,
+        hands: &[Hand; 3],
+        to_screen: &emath::RectTransform,
+        rect: Rect,
+        line_count: &mut usize,
+    ) {
+        let center = pos2(0.0, 0.0);
+        let width = self.start_line_width;
 
         for (i, hand) in hands.iter().enumerate() {
-            let center = pos2(0.0, 0.0);
             let end = center + hand.vec;
-            paint_line(
-                &mut self.shapes,
-                [center, end],
-                self.hand_color,
-                width,
-                &mut line_count,
-            );
+
+            let line = [to_screen * center, to_screen * end];
+            if rect.intersects(Rect::from_two_pos(line[0], line[1])) {
+                self.shapes
+                    .push(Shape::line_segment(line, (width, self.hand_color)));
+                *line_count += 1;
+            }
+
             if i < 2 {
                 self.nodes_buf1.push(Node {
                     pos: end,
@@ -291,38 +312,43 @@ impl FractalClock {
                 });
             }
         }
+    }
 
+    fn draw_fractal_branches(
+        &mut self,
+        hand_rotors: &[emath::Rot2; 2],
+        to_screen: &emath::RectTransform,
+        rect: Rect,
+        line_count: &mut usize,
+    ) {
         let mut current_nodes = &mut self.nodes_buf1;
         let mut next_nodes = &mut self.nodes_buf2;
+        let mut width = self.start_line_width;
 
         for &color in self.depth_colors.iter() {
             next_nodes.clear();
             width *= self.width_factor;
 
-            for &rotor in &hand_rotors {
+            for &rotor in hand_rotors {
                 for &node in current_nodes.iter() {
                     let new_dir = rotor * node.dir;
                     let new_node = Node {
                         pos: node.pos + new_dir,
                         dir: new_dir,
                     };
-                    paint_line(
-                        &mut self.shapes,
-                        [node.pos, new_node.pos],
-                        color,
-                        width,
-                        &mut line_count,
-                    );
+
+                    let line = [to_screen * node.pos, to_screen * new_node.pos];
+                    if rect.intersects(Rect::from_two_pos(line[0], line[1])) {
+                        self.shapes.push(Shape::line_segment(line, (width, color)));
+                        *line_count += 1;
+                    }
+
                     next_nodes.push(new_node);
                 }
             }
 
-            // Buffer swapping
             std::mem::swap(&mut current_nodes, &mut next_nodes);
         }
-
-        self.line_count = line_count;
-        painter.extend(self.shapes.drain(..));
     }
 }
 
