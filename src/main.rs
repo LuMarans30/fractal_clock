@@ -2,6 +2,11 @@ use crate::fractal_clock::FractalClock;
 
 mod fractal_clock;
 
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -24,13 +29,16 @@ pub struct WrapApp {
 
 impl WrapApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        Self {
-            clock: if let Some(storage) = cc.storage {
-                eframe::get_value(storage, "fractal_clock").unwrap_or_default()
-            } else {
-                FractalClock::default()
-            },
-        }
+        let mut clock = if let Some(storage) = cc.storage {
+            eframe::get_value(storage, "fractal_clock").unwrap_or_default()
+        } else {
+            FractalClock::default()
+        };
+
+        // Force color computation on first paint
+        clock.colors_dirty = true;
+
+        Self { clock }
     }
 }
 
