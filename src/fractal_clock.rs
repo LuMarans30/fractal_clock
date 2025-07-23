@@ -1,7 +1,10 @@
+use chrono::{DateTime, Local, Timelike};
 use egui::{
     Color32, Painter, Pos2, Rect, Shape, Stroke, Ui, Vec2,
     containers::{CollapsingHeader, Frame},
-    emath, pos2,
+    emath,
+    epaint::Hsva,
+    pos2,
     widgets::Slider,
 };
 use std::{
@@ -12,7 +15,8 @@ use std::{
 #[derive(serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct FractalClock {
     paused: bool,
-    time: f64,
+    #[serde(skip)]
+    time: DateTime<Local>,
     zoom: f32,
     start_line_width: f32,
     depth: usize,
@@ -77,13 +81,13 @@ impl Default for FractalClock {
     fn default() -> Self {
         Self {
             paused: false,
-            time: 0.0,
-            zoom: 0.075,
+            time: Local::now(),
+            zoom: 0.5,
             start_line_width: 5.0,
-            depth: 14,
-            length_factor: 1.0,
+            depth: 15,
+            length_factor: 0.75,
             luminance_factor: 1.0,
-            width_factor: 0.6,
+            width_factor: 0.75,
             line_count: 0,
             paint_time: Duration::ZERO,
             hand_color: Color32::WHITE,
@@ -105,7 +109,7 @@ impl Default for FractalClock {
 impl FractalClock {
     pub fn update(&mut self, ctx: &egui::Context) {
         if !self.paused {
-            self.time = seconds_since_midnight();
+            self.time = Local::now();
             ctx.request_repaint();
         }
     }
@@ -132,25 +136,29 @@ impl FractalClock {
     }
 
     fn precompute_colors(&mut self) {
+        // Threshold for visible color
+        const MIN_LUMINANCE: f32 = 0.5 / 255.0;
+
         self.depth_colors.clear();
         let mut luminance = 0.7;
 
         for depth_index in 0..self.depth {
             luminance *= self.luminance_factor;
 
-            let luminance_u8 = (255.0 * luminance).round() as u8;
-            if luminance_u8 == 0 {
+            // Exit early when luminance becomes invisible
+            if luminance < MIN_LUMINANCE {
                 break;
             }
 
             let color = if self.rainbow_mode {
-                let hue = (depth_index as f32) / (self.depth as f32) * 360.0;
-                egui::epaint::Hsva::new(hue / 360.0, 1.0, 1.0, 1.0).into()
+                let hue = depth_index as f32 * 360.0 / self.depth as f32;
+                Hsva::new(hue / 360.0, 1.0, 1.0, 1.0).into()
             } else {
+                let to_u8 = |c: u8| (c as f32 * luminance).round() as u8;
                 Color32::from_rgb(
-                    (self.branch_color.r() as f32 * luminance).round() as u8,
-                    (self.branch_color.g() as f32 * luminance).round() as u8,
-                    (self.branch_color.b() as f32 * luminance).round() as u8,
+                    to_u8(self.branch_color.r()),
+                    to_u8(self.branch_color.g()),
+                    to_u8(self.branch_color.b()),
                 )
             };
 
@@ -161,10 +169,7 @@ impl FractalClock {
     }
 
     fn options_ui(&mut self, ui: &mut Ui) {
-        match self.format_time() {
-            Some(time_str) => ui.label(time_str),
-            None => ui.label("Invalid time value"),
-        };
+        ui.label(self.time.format("%H:%M:%S:%S%.3f").to_string());
 
         ui.label(format!("Painted line count: {}", self.line_count));
         ui.label(format!("{:.2?} / paint", self.paint_time));
@@ -225,17 +230,6 @@ impl FractalClock {
         self.color_state = ColorState::Dirty;
     }
 
-    fn format_time(&self) -> Option<String> {
-        use chrono::NaiveTime;
-
-        let total_seconds = self.time.rem_euclid(86400.0);
-        let secs = total_seconds as u32;
-        let nanos = ((total_seconds.fract() * 1e9) as u32).min(999_999_999);
-
-        NaiveTime::from_num_seconds_from_midnight_opt(secs, nanos)
-            .map(|t| t.format("%H:%M:%S%.3f").to_string())
-    }
-
     fn paint(&mut self, painter: &Painter) {
         if matches!(self.color_state, ColorState::Dirty) {
             self.precompute_colors();
@@ -263,26 +257,24 @@ impl FractalClock {
     }
 
     fn create_hands(&self) -> [Hand; 3] {
-        let angle_from_period =
-            |period| TAU * (self.time.rem_euclid(period) / period) as f32 - TAU / 4.0;
+        let seconds = self.time.second() as f32 + self.time.nanosecond() as f32 / 1e9;
+        let minutes = self.time.minute() as f32 + seconds / 60.0;
+        let hours = self.time.hour() as f32 + minutes / 60.0;
 
         [
-            Hand::from_length_angle(self.length_factor, angle_from_period(60.0)), // Second
-            Hand::from_length_angle(self.length_factor, angle_from_period(3600.0)), // Minute
-            Hand::from_length_angle(0.5, angle_from_period(43200.0)),             // Hour
+            Hand::from_length_angle(self.length_factor, TAU * seconds / 60.0 - TAU / 4.0),
+            Hand::from_length_angle(self.length_factor, TAU * minutes / 60.0 - TAU / 4.0),
+            Hand::from_length_angle(0.5, TAU * hours / 12.0 - TAU / 4.0),
         ]
     }
 
     fn calculate_hand_rotors(&self, hands: &[Hand; 3]) -> [emath::Rot2; 2] {
-        let hand_rotations = [
-            hands[0].angle - hands[2].angle + TAU / 2.0,
-            hands[1].angle - hands[2].angle + TAU / 2.0,
-        ];
+        let [second, minute, hour] = hands;
+        let base_rotation = |hand: &Hand| {
+            hand.length * emath::Rot2::from_angle(hand.angle - hour.angle + TAU / 2.0)
+        };
 
-        [
-            hands[0].length * emath::Rot2::from_angle(hand_rotations[0]),
-            hands[1].length * emath::Rot2::from_angle(hand_rotations[1]),
-        ]
+        [base_rotation(second), base_rotation(minute)]
     }
 
     fn draw_hands(
@@ -293,15 +285,18 @@ impl FractalClock {
         line_count: &mut usize,
     ) {
         let center = pos2(0.0, 0.0);
+        let screen_center = to_screen * center;
         let width = self.start_line_width;
 
         for (i, hand) in hands.iter().enumerate() {
             let end = center + hand.vec;
+            let screen_end = to_screen * end;
 
-            let line = [to_screen * center, to_screen * end];
-            if rect.intersects(Rect::from_two_pos(line[0], line[1])) {
-                self.shapes
-                    .push(Shape::line_segment(line, (width, self.hand_color)));
+            if rect.intersects(Rect::from_two_pos(screen_center, screen_end)) {
+                self.shapes.push(Shape::line_segment(
+                    [screen_center, screen_end],
+                    (width, self.hand_color),
+                ));
                 *line_count += 1;
             }
 
@@ -350,10 +345,4 @@ impl FractalClock {
             std::mem::swap(&mut current_nodes, &mut next_nodes);
         }
     }
-}
-
-fn seconds_since_midnight() -> f64 {
-    use chrono::Timelike;
-    let now = chrono::Local::now().time();
-    now.num_seconds_from_midnight() as f64 + 1e-9 * now.nanosecond() as f64
 }
