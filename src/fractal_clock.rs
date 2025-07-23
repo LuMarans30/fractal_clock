@@ -30,6 +30,8 @@ pub struct FractalClock {
     branch_color: Color32,
     hand_color: Color32,
     rainbow_mode: bool,
+    start_hsv_color: Color32,
+    end_hsv_color: Color32,
     pub fullscreen: bool,
     pub transparent_background: bool,
 
@@ -44,15 +46,6 @@ pub struct FractalClock {
     // Precomputed colors to avoid recalculation every frame
     #[serde(skip)]
     depth_colors: Vec<Color32>,
-    #[serde(skip)]
-    color_state: ColorState,
-}
-
-#[derive(serde::Deserialize, serde::Serialize, PartialEq, Default)]
-enum ColorState {
-    #[default]
-    Clean,
-    Dirty,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -79,7 +72,7 @@ impl Hand {
 
 impl Default for FractalClock {
     fn default() -> Self {
-        Self {
+        FractalClock {
             paused: false,
             time: Local::now(),
             zoom: 0.5,
@@ -95,7 +88,8 @@ impl Default for FractalClock {
             transparent_background: true,
             fullscreen: false,
             rainbow_mode: true,
-            color_state: ColorState::Dirty,
+            start_hsv_color: Color32::RED,
+            end_hsv_color: Color32::BLUE,
 
             // Preallocate buffers
             nodes_buf1: Vec::with_capacity(1 << 16),
@@ -135,37 +129,33 @@ impl FractalClock {
             });
     }
 
-    fn precompute_colors(&mut self) {
-        // Threshold for visible color
+    fn compute_colors(&mut self) {
         const MIN_LUMINANCE: f32 = 0.5 / 255.0;
 
         self.depth_colors.clear();
         let mut luminance = 0.7;
 
+        // Define start and end colors in HSV
+        let start_hsv = Hsva::from_srgba_unmultiplied(self.start_hsv_color.to_srgba_unmultiplied()); // Red
+        let end_hsv = Hsva::from_srgba_unmultiplied(self.end_hsv_color.to_srgba_unmultiplied()); // Green
+
         for depth_index in 0..self.depth {
             luminance *= self.luminance_factor;
-
-            // Exit early when luminance becomes invisible
             if luminance < MIN_LUMINANCE {
                 break;
             }
 
-            let color = if self.rainbow_mode {
-                let hue = depth_index as f32 * 360.0 / self.depth as f32;
-                Hsva::new(hue / 360.0, 1.0, 1.0, 1.0).into()
-            } else {
-                let to_u8 = |c: u8| (c as f32 * luminance).round() as u8;
-                Color32::from_rgb(
-                    to_u8(self.branch_color.r()),
-                    to_u8(self.branch_color.g()),
-                    to_u8(self.branch_color.b()),
-                )
-            };
+            // Interpolate HSV values
+            let t = depth_index as f32 / self.depth.max(1) as f32;
+            let interpolated_hsv = Hsva::new(
+                egui::lerp(start_hsv.h..=end_hsv.h, t),
+                egui::lerp(start_hsv.s..=end_hsv.s, t),
+                egui::lerp(start_hsv.v..=end_hsv.v, t),
+                1.0,
+            );
 
-            self.depth_colors.push(color);
+            self.depth_colors.push(interpolated_hsv.into());
         }
-
-        self.color_state = ColorState::Clean;
     }
 
     fn options_ui(&mut self, ui: &mut Ui) {
@@ -182,21 +172,21 @@ impl FractalClock {
             .add(Slider::new(&mut self.depth, 0..=20).text("depth"))
             .changed()
         {
-            self.mark_colors_dirty();
+            self.compute_colors();
         }
 
         if ui
             .add(Slider::new(&mut self.length_factor, 0.0..=1.0).text("length factor"))
             .changed()
         {
-            self.mark_colors_dirty();
+            self.compute_colors();
         }
 
         if ui
             .add(Slider::new(&mut self.luminance_factor, 0.0..=1.0).text("luminance factor"))
             .changed()
         {
-            self.mark_colors_dirty();
+            self.compute_colors();
         }
 
         ui.add(Slider::new(&mut self.width_factor, 0.0..=1.0).text("width factor"));
@@ -204,7 +194,7 @@ impl FractalClock {
         egui::Grid::new("color_settings_grid").show(ui, |ui| {
             ui.label("Branch color:");
             if ui.color_edit_button_srgba(&mut self.branch_color).changed() {
-                self.mark_colors_dirty();
+                self.compute_colors();
             }
             ui.end_row();
             ui.label("Hand color:");
@@ -213,8 +203,25 @@ impl FractalClock {
         });
 
         if ui.checkbox(&mut self.rainbow_mode, "Rainbow").changed() {
-            self.mark_colors_dirty();
+            self.compute_colors();
         }
+
+        if self.rainbow_mode {
+            if ui
+                .color_edit_button_srgba(&mut self.start_hsv_color)
+                .changed()
+            {
+                self.compute_colors();
+            }
+
+            if ui
+                .color_edit_button_srgba(&mut self.end_hsv_color)
+                .changed()
+            {
+                self.compute_colors();
+            }
+        }
+
         ui.checkbox(&mut self.fullscreen, "Fullscreen mode");
         ui.checkbox(&mut self.transparent_background, "Transparent background");
 
@@ -226,13 +233,9 @@ impl FractalClock {
         );
     }
 
-    pub fn mark_colors_dirty(&mut self) {
-        self.color_state = ColorState::Dirty;
-    }
-
     fn paint(&mut self, painter: &Painter) {
-        if matches!(self.color_state, ColorState::Dirty) {
-            self.precompute_colors();
+        if self.depth_colors.is_empty() {
+            self.compute_colors();
         }
 
         let rect = painter.clip_rect();

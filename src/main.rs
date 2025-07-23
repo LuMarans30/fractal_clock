@@ -29,13 +29,10 @@ pub struct WrapApp {
 
 impl WrapApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let mut clock: FractalClock =
-            eframe::get_value(cc.storage.expect("Storage error"), "fractal_clock")
-                .unwrap_or_default();
-
-        clock.mark_colors_dirty();
-
-        Self { clock }
+        Self {
+            clock: eframe::get_value(cc.storage.expect("Storage error"), "fractal_clock")
+                .unwrap_or_default(),
+        }
     }
 }
 
