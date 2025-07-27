@@ -40,8 +40,8 @@ impl Default for FractalClockConfig {
             branch_color: Color32::from_rgb(115, 186, 37),
             hand_color: Color32::WHITE,
             rainbow_mode: true,
-            start_hsv: Hsva::new(0.0, 100.0, 100.0, 1.0),
-            end_hsv: Hsva::new(240.0, 100.0, 100.0, 1.0),
+            start_hsv: Hsva::from_rgb([255.0, 0.0, 0.0]),
+            end_hsv: Hsva::from_rgb([0.0, 0.0, 255.0]),
         }
     }
 }
@@ -260,7 +260,7 @@ impl FractalClock {
         ui.checkbox(&mut self.fullscreen, "Fullscreen mode");
         ui.checkbox(&mut self.transparent_background, "Transparent background");
 
-        egui::reset_button(ui, self, "Reset");
+        egui::reset_button(ui, self, "🔁 Reset");
 
         ui.hyperlink_to(
             "Standalone version of this code",
